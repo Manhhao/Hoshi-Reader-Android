@@ -1,40 +1,40 @@
 package de.manhhao.hoshi
 
-data class ImportResult(
+class ImportResult(
     val success: Boolean,
     val termCount: Long,
     val metaCount: Long,
     val mediaCount: Long,
 )
 
-data class DictionaryStyle(
+class DictionaryStyle(
     val dictName: String,
     val styles: String,
 )
 
-data class Frequency(
+class Frequency(
     val value: Int,
     val displayValue: String,
 )
 
-data class GlossaryEntry(
+class GlossaryEntry(
     val dictName: String,
     val glossary: String,
     val definitionTags: String,
     val termTags: String,
 )
 
-data class FrequencyEntry(
+class FrequencyEntry(
     val dictName: String,
     val frequencies: Array<Frequency>,
 )
 
-data class PitchEntry(
+class PitchEntry(
     val dictName: String,
     val pitchPositions: IntArray,
 )
 
-data class TermResult(
+class TermResult(
     val expression: String,
     val reading: String,
     val rules: String,
@@ -43,7 +43,7 @@ data class TermResult(
     val pitches: Array<PitchEntry>,
 )
 
-data class LookupResult(
+class LookupResult(
     val matched: String,
     val deinflected: String,
     val process: Array<String>,
