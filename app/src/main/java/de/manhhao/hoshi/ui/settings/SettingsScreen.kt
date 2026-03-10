@@ -80,7 +80,8 @@ fun SettingsScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(20.dp),
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.Top
     ) {
         Text("Settings")
@@ -110,16 +111,18 @@ fun SettingsScreen() {
                 lookupResultText = if (results.isEmpty()) {
                     ""
                 } else {
-                    results.joinToString("\n\n") { lr ->
-                        val t = lr.term
-                        buildString {
-                            appendLine(t.expression)
-                            appendLine(t.reading)
-                            if (t.glossaries.isNotEmpty()) {
-                                append(t.glossaries[0].glossary)
-                            }
-                        }.trimEnd()
-                    }
+                    val lr = results[0]
+                    val t = lr.term
+                    buildString {
+                        appendLine(t.expression)
+                        appendLine(t.reading)
+                        if (lr.process.isNotEmpty()) {
+                            appendLine(lr.process.joinToString(" -> "))
+                        }
+                        if (t.glossaries.isNotEmpty()) {
+                            append(t.glossaries[0].glossary)
+                        }
+                    }.trimEnd()
                 }
             })
         )
