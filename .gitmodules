@@ -1,0 +1,4 @@
+[submodule "app/src/main/cpp/hoshidicts"]
+	path = app/src/main/cpp/hoshidicts
+	url = https://github.com/Manhhao/hoshidicts.git
+	branch = main-mit
