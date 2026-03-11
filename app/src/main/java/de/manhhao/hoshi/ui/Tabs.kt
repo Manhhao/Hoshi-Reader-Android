@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Book
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -26,7 +26,7 @@ import de.manhhao.hoshi.ui.bookshelf.BookshelfScreen
 import de.manhhao.hoshi.ui.settings.SettingsScreen
 
 private enum class MainTab(val title: String, val icon: ImageVector) {
-    Books("Books", Icons.Default.Book),
+    Books("Books", Icons.AutoMirrored.Filled.List),
     Settings("Settings", Icons.Default.Settings)
 }
 
