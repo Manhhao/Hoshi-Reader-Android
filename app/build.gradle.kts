@@ -38,7 +38,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -52,12 +53,17 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        resources {
+            excludes += setOf("com/sun/jna/**")
+        }
+    }
     splits {
         abi {
             isEnable = true
+            isUniversalApk = false
             reset()
             include("arm64-v8a", "x86_64")
-            isUniversalApk = false
         }
     }
     externalNativeBuild {
@@ -78,7 +84,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation("androidx.compose.material:material-icons-core")
+    implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.jna)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
