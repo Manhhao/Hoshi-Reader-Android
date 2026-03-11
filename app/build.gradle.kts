@@ -3,6 +3,16 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val rustProjectDir = file("src/main/rust/hoshiepub")
+val uniffiOutDir = layout.buildDirectory.dir("generated/source/uniffi/main/kotlin").get().asFile
+val rustJniLibsDir = layout.buildDirectory.dir("jniLibs").get().asFile
+val cargo = System.getenv("HOME") + "/.cargo/bin/cargo"
+val hostLibExtension = when {
+    System.getProperty("os.name").lowercase().contains("mac") -> "dylib"
+    System.getProperty("os.name").lowercase().contains("win") -> "dll"
+    else -> "so"
+}
+
 android {
     namespace = "de.manhhao.hoshi"
     compileSdk {
@@ -17,6 +27,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
@@ -47,6 +60,8 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
+    sourceSets["main"].java.directories.add("build/generated/source/uniffi/main/kotlin")
+    sourceSets["main"].jniLibs.directories.add("build/jniLibs")
 }
 
 dependencies {
@@ -59,6 +74,68 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.jna)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+val buildRustHost by tasks.registering(Exec::class) {
+    workingDir = rustProjectDir
+    commandLine(cargo, "build")
+}
+
+val generateUniffiKotlin by tasks.registering(Exec::class) {
+    dependsOn(buildRustHost)
+    workingDir = rustProjectDir
+
+    val hostLibPath = rustProjectDir.resolve("target/debug/libhoshiepub.$hostLibExtension")
+
+    commandLine(
+        cargo, "run", "--bin", "uniffi-bindgen", "--",
+        "generate",
+        "--library", hostLibPath.absolutePath,
+        "--language", "kotlin",
+        "--out-dir", uniffiOutDir.absolutePath
+    )
+}
+
+val buildRustAndroidDebug by tasks.registering(Exec::class) {
+    workingDir = rustProjectDir
+    commandLine(
+        cargo, "ndk",
+        "-t", "arm64-v8a",
+        "-t", "x86_64",
+        "-o", rustJniLibsDir.absolutePath,
+        "build"
+    )
+}
+
+val buildRustAndroidRelease by tasks.registering(Exec::class) {
+    workingDir = rustProjectDir
+    commandLine(
+        cargo, "ndk",
+        "-t", "arm64-v8a",
+        "-t", "x86_64",
+        "-o", rustJniLibsDir.absolutePath,
+        "build",
+        "--release"
+    )
+}
+
+tasks.named("preBuild") {
+    dependsOn(generateUniffiKotlin)
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    dependsOn(generateUniffiKotlin)
+    source("build/generated/source/uniffi/main/kotlin")
+}
+
+afterEvaluate {
+    tasks.named("preDebugBuild") {
+        dependsOn(buildRustAndroidDebug)
+    }
+    tasks.named("preReleaseBuild") {
+        dependsOn(buildRustAndroidRelease)
+    }
 }
