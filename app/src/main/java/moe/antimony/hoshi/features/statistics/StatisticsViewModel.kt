@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import moe.antimony.hoshi.di.DefaultDispatcher
 import moe.antimony.hoshi.features.reader.ReaderSettingsRepository
+import moe.antimony.hoshi.features.sync.SyncReloadScheduler
 import moe.antimony.hoshi.R
 import moe.antimony.hoshi.ui.UiText
 
@@ -52,9 +53,10 @@ internal class StatisticsViewModel internal constructor(
         calculationDispatcher = calculationDispatcher,
         coroutineScope = null,
     ) {
+        val syncReload = SyncReloadScheduler(scope, { syncStorage.applyReaderState != null }, ::reload)
         scope.launch {
             combine(statisticsStore.changes, syncStorage.booksChanged, readerSettingsRepository.settings.map { it.statisticsResetMinutes }.distinctUntilChanged()) { _, _, _ -> Unit }
-                .collect { reload() }
+                .collect { syncReload.schedule() }
         }
     }
 

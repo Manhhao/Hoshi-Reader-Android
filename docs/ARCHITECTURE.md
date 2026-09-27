@@ -503,6 +503,11 @@ refactor goals belong in `docs/ARCHITECTURE_REFACTORING.md`.
   Hoshi cloud books are local metadata placeholders: tapping downloads the EPUB,
   Delete Local retains their cloud state, and Delete Everywhere archives sessions
   and publishes deletion. Covers and Sasayaki match data download automatically.
+- Bookshelf and Statistics batch automatic change notifications into one reload two
+  seconds after the first notification, and skip it while the reader's sync callback
+  is registered. Statistics archive-count notifications also skip reloads while reading.
+  Pending delayed reloads belong to the ViewModel scope; normal screen-entry refreshes
+  reload the current data after returning from Reader.
 - Synced bookmarks, highlights, sessions, playback and matches apply to an open
   reader through existing reader/controller boundaries. Pending saves flush before
   reconciliation; bookmark restoration suppresses local writes, and remote deletion

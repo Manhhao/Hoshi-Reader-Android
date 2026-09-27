@@ -3,6 +3,7 @@ package moe.antimony.hoshi.features.bookshelf
 import moe.antimony.hoshi.features.sync.SyncFileType
 import moe.antimony.hoshi.features.sync.syncKey
 import moe.antimony.hoshi.features.sync.SyncStorage
+import moe.antimony.hoshi.features.sync.SyncReloadScheduler
 import moe.antimony.hoshi.features.sync.syncMessage
 
 import android.net.Uri
@@ -53,7 +54,12 @@ internal class BookshelfViewModel : ViewModel {
         importGate = PendingImportGate(),
         marker = Unit,
     ) {
-        viewModelScope.launch { syncStorage.booksChanged.collect { if (uiState.value.hasLoadedBooks) reloadBookEntries() } }
+        val syncReload = SyncReloadScheduler(viewModelScope, { syncStorage.applyReaderState != null }, ::reloadBookEntries)
+        viewModelScope.launch {
+            syncStorage.booksChanged.collect {
+                if (uiState.value.hasLoadedBooks) syncReload.schedule()
+            }
+        }
         viewModelScope.launch {
             syncStorage.records.collect { records ->
                 _uiState.update { state ->

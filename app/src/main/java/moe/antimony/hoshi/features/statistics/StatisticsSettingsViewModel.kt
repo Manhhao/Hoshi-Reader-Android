@@ -43,7 +43,11 @@ internal class StatisticsSettingsViewModel internal constructor(
         repository,
         null,
     ) {
-        scope.launch { syncStorage.booksChanged.collect { reload() } }
+        scope.launch {
+            syncStorage.booksChanged.collect {
+                if (syncStorage.applyReaderState == null) reload()
+            }
+        }
     }
 
     private val scope get() = coroutineScope ?: viewModelScope
