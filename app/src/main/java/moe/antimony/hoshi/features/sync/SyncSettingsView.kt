@@ -149,7 +149,9 @@ fun SyncSettingsView(
         scope.launch {
             try {
                 googleAuth.authorizationResult(result.data)
+                hoshiSync.stop()
                 googleAuth.accept()
+                hoshiSync.resetConnection()
                 hoshiSync.start()
                 authStatus = DriveAuthStatus.Connected
             } catch (error: CancellationException) {
@@ -272,7 +274,9 @@ fun SyncSettingsView(
                     if (result.hasResolution()) {
                         authorizationLauncher.launch(IntentSenderRequest.Builder(result.pendingIntent!!).build())
                     } else {
+                        hoshiSync.stop()
                         googleAuth.accept()
+                        hoshiSync.resetConnection()
                         hoshiSync.start()
                         authStatus = DriveAuthStatus.Connected
                         isAuthorizing = false

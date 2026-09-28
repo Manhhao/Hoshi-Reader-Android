@@ -15,6 +15,8 @@ Historical release notes before v1.3.0 live in [CHANGELOG_ARCHIVE.md](CHANGELOG_
   Book deletion actions stack vertically, and cloud icons sit inline on the first
   title line.
   Failed Google Drive sign-ins show an error dialog.
+  Connecting through the Google account picker resets pending sync operations so
+  books deleted before sign-in do not delete existing cloud copies.
   Devices without Google Play Services can connect through their browser.
   Android-generated Sasayaki matches include the image-list field required by iOS.
   Debug builds sync edits after 2 seconds and poll for cloud changes every 5 seconds.
