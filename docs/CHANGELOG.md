@@ -21,6 +21,9 @@ Historical release notes before v1.3.0 live in [CHANGELOG_ARCHIVE.md](CHANGELOG_
   Android-generated Sasayaki matches include the image-list field required by iOS.
   Debug builds sync edits after 2 seconds and poll for cloud changes every 5 seconds.
   Bookshelf and Statistics refreshes are batched during sync and skipped while reading.
+  Full syncs of large libraries are faster, a failed book no longer stops the
+  rest of the sync, and Sync settings show a transfer queue with progress and
+  per-book errors.
 
 ### Changed
 

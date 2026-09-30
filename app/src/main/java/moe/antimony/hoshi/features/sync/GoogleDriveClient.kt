@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -167,9 +168,9 @@ class GoogleDriveClient internal constructor(
         read: (HttpURLConnection) -> ByteArray,
     ): ByteArray {
         if (isStopped) throw CancellationException()
-        checkInternet()
+        unavailable { checkInternet() }
         val connection = connectionId
-        val token = auth.accessToken()
+        val token = unavailable { auth.accessToken() }
         val timeout = if (provider() == SyncProvider.Ttu) 10_000 else 60_000
         val request = openConnection(url).apply {
             requestMethod = method
@@ -189,6 +190,8 @@ class GoogleDriveClient internal constructor(
                             configure(request)
                             val status = request.responseCode
                             status to if (status >= 400) request.errorStream?.use { it.readBytes() } ?: byteArrayOf() else read(request)
+                        } catch (error: IOException) {
+                            throw GoogleDriveUnavailableException(error)
                         } finally {
                             connections.remove(request)
                             request.disconnect()
@@ -217,6 +220,14 @@ class GoogleDriveClient internal constructor(
             throw GoogleDriveApiException(message ?: "Request failed with status $status", status)
         }
         return data
+    }
+
+    private inline fun <T> unavailable(action: () -> T): T = try {
+        action()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        throw GoogleDriveUnavailableException(error)
     }
 
 }

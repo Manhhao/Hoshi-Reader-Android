@@ -1,5 +1,6 @@
 package moe.antimony.hoshi.features.sync
 
+import moe.antimony.hoshi.ui.theme.hoshiContainerOutline
 import moe.antimony.hoshi.ui.theme.hoshiSurfaces
 import moe.antimony.hoshi.ui.theme.hoshiContainerBorder
 import android.content.ClipData
@@ -23,26 +24,37 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.SwapVert
 import moe.antimony.hoshi.ui.HoshiAlertDialog as AlertDialog
 import moe.antimony.hoshi.ui.HoshiButton as Button
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import moe.antimony.hoshi.ui.HoshiDropdownMenu as DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedSecureTextField
 import androidx.compose.material3.OutlinedTextField
@@ -52,6 +64,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,11 +72,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringArrayResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -72,6 +87,7 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -120,6 +136,7 @@ fun SyncSettingsView(
     var showSignOutConfirmation by remember { mutableStateOf(false) }
     var showClearCacheConfirmation by remember { mutableStateOf(false) }
     var showAuthorizationError by remember { mutableStateOf(false) }
+    var showQueue by remember { mutableStateOf(false) }
     val screenState = SyncSettingsScreenState(settings = settings, authStatus = authStatus)
     val currentSettings = settings
     val currentReaderSettings = readerSettings
@@ -396,6 +413,9 @@ fun SyncSettingsView(
                 }
             },
         )
+    }
+    if (showQueue) {
+        SyncQueueSheet(state = hoshiState, onDismiss = { showQueue = false })
     }
     val colorScheme = MaterialTheme.colorScheme
     Scaffold(
@@ -698,6 +718,33 @@ fun SyncSettingsView(
                             )
                             SettingsDivider()
                         }
+                        val progress = hoshiState.progress
+                        val failed = hoshiState.queue.count { it.error != null }
+                        ListItem(
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickable { showQueue = true },
+                            headlineContent = { Text(stringResource(R.string.sync_queue)) },
+                            supportingContent = progress?.let {
+                                {
+                                    LinearProgressIndicator(
+                                        progress = { progress.done.toFloat() / progress.total },
+                                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                    )
+                                }
+                            },
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    when {
+                                        progress != null -> Text(stringResource(R.string.sync_queue_progress, progress.done, progress.total))
+                                        failed > 0 -> Text(pluralStringResource(R.plurals.sync_queue_failed, failed, failed), color = colorScheme.error)
+                                        hoshiState.queue.isNotEmpty() -> Text(hoshiState.queue.size.toString())
+                                        else -> Text(stringResource(R.string.sync_queue_empty))
+                                    }
+                                    Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = colorScheme.onSurfaceVariant)
+                                }
+                            },
+                        )
+                        SettingsDivider()
                         TextButton(onClick = { scope.launch { hoshiSync.sync() } }, enabled = !hoshiState.isSyncing) {
                             Text(stringResource(R.string.sync_now))
                         }
@@ -739,6 +786,52 @@ fun SyncSettingsView(
                         }
                     }
                     if (currentSettings.provider == SyncProvider.Ttu) GoogleCloudOAuthSetupCard()
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyncQueueSheet(state: GoogleDriveSyncState, onDismiss: () -> Unit) {
+    val colorScheme = MaterialTheme.colorScheme
+    ModalBottomSheet(
+        modifier = Modifier.hoshiContainerOutline(BottomSheetDefaults.ExpandedShape),
+        containerColor = hoshiSurfaces.overlay,
+        tonalElevation = 0.dp,
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(stringResource(R.string.sync_queue), style = MaterialTheme.typography.titleLarge)
+            if (state.queue.isEmpty()) {
+                Text(stringResource(R.string.sync_queue_all_synced), color = colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(state.queue, key = { it.key }) { item ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            item.direction?.let { direction ->
+                                Icon(
+                                    when (direction) {
+                                        SyncTransferDirection.Upload -> Icons.Rounded.ArrowUpward
+                                        SyncTransferDirection.Download -> Icons.Rounded.ArrowDownward
+                                        SyncTransferDirection.Both -> Icons.Rounded.SwapVert
+                                    },
+                                    contentDescription = null,
+                                    tint = colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                item.error?.let { Text(it.asString(), style = MaterialTheme.typography.bodySmall, color = colorScheme.error) }
+                            }
+                            if (item.key == state.progress?.current) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                    }
                 }
             }
         }

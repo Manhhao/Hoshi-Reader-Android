@@ -907,6 +907,14 @@
     <string name="sync_book_not_uploaded">This book has not been uploaded yet.</string>
     <string name="sync_last_sync">Last Sync</string>
     <string name="sync_now">Sync Now</string>
+    <string name="sync_queue">Queue</string>
+    <string name="sync_queue_empty">Empty</string>
+    <string name="sync_queue_all_synced">All Books Synced</string>
+    <string name="sync_queue_progress" translatable="false">%1$d / %2$d</string>
+    <plurals name="sync_queue_failed">
+        <item quantity="one">%1$d failed</item>
+        <item quantity="other">%1$d failed</item>
+    </plurals>
     <string name="sync_delete_local">Delete Local</string>
     <string name="sync_delete_everywhere">Delete Everywhere</string>
 </resources>

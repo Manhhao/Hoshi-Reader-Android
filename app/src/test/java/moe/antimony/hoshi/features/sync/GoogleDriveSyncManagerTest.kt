@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
@@ -183,6 +184,9 @@ class GoogleDriveSyncManagerTest {
         val reference = f.store.state.books.getValue("book-a").files.getValue(SyncFileType.epub)
         assertEquals("book-a.epub", reference.value)
         assertTrue(f.store.state.books.getValue("book-a").pending)
+        assertFalse(f.manager.state.value.isSyncing)
+        assertNull(f.manager.state.value.progress)
+        assertTrue(f.manager.state.value.queue.isEmpty())
         f.manager.sync()
         f.store.deleteLocalBook("book-a")
         f.manager.sync()
@@ -329,6 +333,54 @@ class GoogleDriveSyncManagerTest {
         assertTrue(f.store.loadBook("book-a")!!.deleted)
     }
 
+    @Test fun bookFailureContinuesRunAndKeepsCursor() = runTest {
+        val f = fixture()
+        f.remote.addState("a", "book-a.json", SyncFormat.encode(remoteBook))
+        f.remote.addState("b", "book-b.json", SyncFormat.encode(remoteBook.copy(metadata = Timestamped(1000, SyncMetadata("Other")))))
+        f.remote.failRead = { if (it == "a") HttpStatus(500) else null }
+        f.manager.sync()
+        runCurrent()
+        assertNull(f.manager.state.value.errorMessage)
+        assertFalse(f.manager.state.value.isSyncing)
+        assertEquals("Other", f.store.loadBook("book-b")!!.metadata.value.title)
+        assertNull(f.manager.cache.cursor)
+        val item = f.manager.state.value.queue.single()
+        assertEquals("book-a", item.key)
+        assertNull(item.direction)
+        assertNotNull(item.error)
+        f.remote.failRead = { null }
+        f.manager.sync()
+        runCurrent()
+        assertEquals("next", f.manager.cache.cursor)
+        assertTrue(f.manager.state.value.queue.isEmpty())
+    }
+
+    @Test fun unavailableDriveStopsRun() = runTest {
+        val f = fixture()
+        f.remote.addState("a", "book-a.json", SyncFormat.encode(remoteBook))
+        f.remote.addState("b", "book-b.json", SyncFormat.encode(remoteBook))
+        f.remote.failRead = { if (it == "a") IOException("offline") else null }
+        f.manager.sync()
+        runCurrent()
+        assertNotNull(f.manager.state.value.errorMessage)
+        assertNull(f.store.loadBook("book-b"))
+        assertEquals(0, f.remote.reads["b"] ?: 0)
+        assertTrue(f.manager.state.value.queue.isEmpty())
+        assertNull(f.manager.cache.cursor)
+    }
+
+    @Test fun listedStateFilesSkipPerBookLookup() = runTest {
+        val f = fixture()
+        f.remote.reportChanges = false
+        f.remote.addState("a", "book-a.json", SyncFormat.encode(remoteBook))
+        f.manager.sync()
+        runCurrent()
+        assertNull(f.manager.state.value.errorMessage)
+        assertEquals(1, f.remote.reads["a"])
+        assertEquals("Remote", f.store.loadBook("book-a")!!.metadata.value.title)
+        assertTrue(f.remote.queries.none { "name='book-a.json'" in it })
+    }
+
     private data class Fixture(val remote: DriveService, val books: BookRepository, val store: SyncStorage, val manager: GoogleDriveSyncManager)
 
     private class MemoryPreferences : DataStore<Preferences> {
@@ -343,7 +395,10 @@ class GoogleDriveSyncManagerTest {
         val writes = mutableListOf<String>()
         val trashed = mutableListOf<String>()
         val requests = mutableListOf<String>()
+        val queries = mutableListOf<String>()
         var listPageSize = Int.MAX_VALUE
+        var reportChanges = true
+        var failRead: (String) -> Exception? = { null }
         var beforeWrite: (suspend () -> Unit)? = null
 
         init {
@@ -363,16 +418,23 @@ class GoogleDriveSyncManagerTest {
         fun connection(address: String): HttpURLConnection = object : HttpURLConnection(URL(address)) {
             private val output = ByteArrayOutputStream()
             private var response: ByteArray? = null
+            private var status = 200
             override fun setRequestMethod(value: String) { method = value }
             override fun connect() = Unit
             override fun disconnect() = Unit
             override fun usingProxy() = false
             override fun getOutputStream() = output
             override fun getResponseCode(): Int {
-                if (response == null) response = respond(url, method, output.toString(Charsets.UTF_8.name())).toByteArray()
-                return 200
+                if (response == null) response = try {
+                    respond(url, method, output.toString(Charsets.UTF_8.name())).toByteArray()
+                } catch (error: HttpStatus) {
+                    status = error.status
+                    byteArrayOf()
+                }
+                return status
             }
             override fun getInputStream() = response!!.inputStream()
+            override fun getErrorStream() = response!!.inputStream()
         }
 
         private fun respond(url: URL, method: String, body: String): String {
@@ -384,12 +446,13 @@ class GoogleDriveSyncManagerTest {
             if (path == "changes/startPageToken") return "{\"startPageToken\":\"start\"}"
             if (path == "changes") return buildJsonObject {
                 put("newStartPageToken", "next")
-                put("changes", JsonArray(entries.values.filter { it.file.parents == listOf("s") }.map {
+                put("changes", JsonArray(entries.values.filter { reportChanges && it.file.parents == listOf("s") }.map {
                     buildJsonObject { put("removed", false); put("file", SyncFormat.json.parseToJsonElement(SyncFormat.json.encodeToString(it.file))) }
                 }))
             }.toString()
             if (method == "GET" && path == "files") {
                 val q = query.getValue("q")
+                queries += q
                 val parent = Regex("'([^']+)' in parents").find(q)!!.groupValues[1]
                 val name = Regex("name='([^']*)'").find(q)?.groupValues?.get(1)
                 val matching = entries.values.filter { parent in it.file.parents.orEmpty() && (name == null || name == it.file.name) }
@@ -404,6 +467,7 @@ class GoogleDriveSyncManagerTest {
             if (method == "GET") {
                 val id = path.substringAfter("files/")
                 requests += "read/$id"
+                failRead(id)?.let { throw it }
                 reads[id] = (reads[id] ?: 0) + 1
                 return entries.getValue(id).data
             }
@@ -432,6 +496,8 @@ class GoogleDriveSyncManagerTest {
             return SyncFormat.json.encodeToString(entries.getValue(id).file)
         }
     }
+
+    private class HttpStatus(val status: Int) : Exception()
 
     private object NoTtu : DriveSyncDataSource {
         override suspend fun findRootFolder() = error("TTU")
