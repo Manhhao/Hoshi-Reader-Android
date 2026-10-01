@@ -495,6 +495,7 @@ class GoogleDriveSyncManager internal constructor(
     private suspend fun loadLayout() {
         val layout = drive.layout()
         currentCoroutineContext().ensureActive()
+        if (cache.root.isNotEmpty() && cache.root != layout.root) resetConnection()
         cache = cache.copy(root = layout.root, stateFolder = layout.state, bookFolder = layout.books)
     }
 
