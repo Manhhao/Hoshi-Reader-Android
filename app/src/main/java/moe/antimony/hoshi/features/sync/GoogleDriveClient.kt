@@ -16,16 +16,20 @@ import java.util.Collections
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -164,6 +168,7 @@ class GoogleDriveClient internal constructor(
         method: String,
         contentType: String?,
         retry: Boolean = true,
+        attempt: Int = 0,
         configure: (HttpURLConnection) -> Unit = {},
         read: (HttpURLConnection) -> ByteArray,
     ): ByteArray {
@@ -210,16 +215,25 @@ class GoogleDriveClient internal constructor(
             auth.clearAccessToken(token)
             checkConnection(connection)
             currentCoroutineContext().ensureActive()
-            return perform(url, method, contentType, false, configure, read)
+            return perform(url, method, contentType, false, attempt, configure, read)
         }
         if (status >= 400) {
-            val message = runCatching {
-                SyncFormat.json.parseToJsonElement(data.decodeToString()).jsonObject["error"]?.jsonObject
-                    ?.get("message")?.jsonPrimitive?.content
-            }.getOrNull()
+            val error = runCatching { SyncFormat.json.parseToJsonElement(data.decodeToString()).jsonObject["error"]?.jsonObject }.getOrNull()
+            if (attempt < 4 && isTransient(method, status, error)) {
+                delay(1_000L * (1L shl attempt) + Random.nextLong(1_000))
+                checkConnection(connection)
+                return perform(url, method, contentType, retry, attempt + 1, configure, read)
+            }
+            val message = runCatching { error?.get("message")?.jsonPrimitive?.content }.getOrNull()
             throw GoogleDriveApiException(message ?: "Request failed with status $status", status)
         }
         return data
+    }
+
+    private fun isTransient(method: String, status: Int, error: JsonObject?): Boolean {
+        val reason = runCatching { error?.get("errors")?.jsonArray?.firstOrNull()?.jsonObject?.get("reason")?.jsonPrimitive?.content }.getOrNull()
+        val limited = status == 429 || (status == 403 && reason?.endsWith("ateLimitExceeded") == true)
+        return limited || (status >= 500 && method != "POST")
     }
 
     private inline fun <T> unavailable(action: () -> T): T = try {
