@@ -330,7 +330,7 @@ class GoogleDriveSyncManagerTest {
         assertNull(f.manager.state.value.errorMessage)
         assertTrue(stopped)
         assertFalse(root.exists())
-        assertTrue(f.store.loadBook("book-a")!!.deleted)
+        assertTrue(f.store.state.books.getValue("book-a").deleted)
     }
 
     @Test fun bookFailureContinuesRunAndKeepsCursor() = runTest {

@@ -37,6 +37,7 @@ class SyncStorage @Inject constructor(
     private val revision = MutableStateFlow(0)
     val booksChanged = revision.asStateFlow()
     var onChange: (() -> Unit)? = null
+    var syncEnabled: (suspend () -> Boolean)? = null
     var applyReaderState: (suspend (String, SyncBook, Boolean) -> Unit)? = null
 
     init {
@@ -101,6 +102,7 @@ class SyncStorage @Inject constructor(
     }
 
     suspend fun resetSyncState() = transaction {
+        state = state.copy(books = state.books.filterKeys { books.loadMetadata(resolveBookDirectory(it)) != null })
         for ((key, record) in state.books) {
             val archived = books.loadMetadata(bookDirectory(key)) == null
             updateRecord(key) { record.copy(generation = if (archived) 0 else 1, deleted = archived, files = emptyMap(), attached = false, pending = true) }
@@ -110,12 +112,15 @@ class SyncStorage @Inject constructor(
     }
 
     suspend fun prepareLibrary() = transaction {
+        val empty = mutableListOf<File>()
         for (root in bookDirectories()) {
-            statistics.loadSessions(root)
+            val sessions = statistics.loadSessions(root)
             prepareBook(root)
+            if (root.parentFile!!.name == "statistics_archive" && sessions.isEmpty()) empty += root
         }
         books.loadShelfList()
         save()
+        empty.forEach { it.deleteRecursively() }
     }
 
     suspend fun prepareBook(root: File) = transaction {
@@ -129,10 +134,11 @@ class SyncStorage @Inject constructor(
         state = state.copy(books = state.books + (key to record))
     }
 
-    suspend fun loadBook(key: String): SyncBook? = transaction {
+    suspend fun loadBook(key: String, remote: SyncBook? = null): SyncBook? = transaction {
         val record = state.books[key] ?: return@transaction null
         val root = resolveBookDirectory(key)
-        val metadata = books.loadMetadata(root) ?: return@transaction null
+        val metadata = books.loadMetadata(root)
+            ?: return@transaction if (remote != null && record.deleted) SyncBook(record.generation, true, remote.metadata, characterCount = remote.characterCount, files = record.files) else null
         var book = SyncBook(
             generation = record.generation,
             deleted = record.deleted,
@@ -165,6 +171,7 @@ class SyncStorage @Inject constructor(
             bookURL.deleteRecursively()
         }
         val root = bookDirectory(folder, book.deleted)
+        val stored = book.deleted && book.sessions.isEmpty()
         val oldMetadata = books.loadMetadata(root)
         val title = oldMetadata?.title ?: book.metadata.value.title
         val metadata = BookMetadata(
@@ -182,7 +189,7 @@ class SyncStorage @Inject constructor(
             profileId = oldMetadata?.profileId,
             bookLanguage = oldMetadata?.bookLanguage,
         )
-        if (metadata != oldMetadata) {
+        if (!stored && metadata != oldMetadata) {
             sidecars.saveMetadata(root, metadata)
             changed = true
         }
@@ -226,6 +233,7 @@ class SyncStorage @Inject constructor(
         state = state.copy(books = state.books + (key to record))
         clearUnusedCover(key, book.sessions)
         if (state.books[key] != oldRecord) save()
+        if (stored) root.deleteRecursively()
         if (changed) notifyBooksChanged()
     }
 
@@ -262,6 +270,16 @@ class SyncStorage @Inject constructor(
         transaction {
             val root = bookDirectory(key)
             statistics.archiveBook(root)
+            val archive = bookDirectory(key, true)
+            val stored = statistics.loadSessions(archive).isEmpty()
+            if (stored && !state.books.getValue(key).attached && syncEnabled?.invoke() != true) {
+                removeRecord(key)
+                save()
+                archive.deleteRecursively()
+                root.deleteRecursively()
+                notifyBooksChanged()
+                return@transaction
+            }
             updateRecord(key) { record ->
                 record.copy(deleted = true, pending = true, cleanup = record.cleanup + record.generation,
                     files = record.files - SyncFileType.epub - SyncFileType.sasayaki,
@@ -269,6 +287,7 @@ class SyncStorage @Inject constructor(
             }
             saveChanges()
             root.deleteRecursively()
+            if (stored) archive.deleteRecursively()
             clearUnusedCover(key)
             saveChanges()
         }

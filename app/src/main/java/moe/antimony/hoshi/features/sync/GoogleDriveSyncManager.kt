@@ -135,6 +135,7 @@ class GoogleDriveSyncManager internal constructor(
 
     init {
         store.onChange = { scope.launch { schedule() } }
+        store.syncEnabled = { withContext(mainDispatcher) { enabled() } }
     }
 
     private suspend fun enabled(): Boolean {
@@ -470,14 +471,23 @@ class GoogleDriveSyncManager internal constructor(
         }
         var remote = remoteBooks[key]?.takeIf { it.first == versions }?.second ?: readState(files, SyncBook::merge)
         mergeBook(key, remote)
-        val book = store.loadBook(key) ?: return
+        val book = store.loadBook(key, remote)
+        if (book == null) {
+            store.transaction {
+                if (store.state.books[key] != null) {
+                    store.updateRecord(key) { it.copy(pending = false, cleanup = emptySet()) }
+                    store.save()
+                }
+            }
+            return
+        }
         if (book.needsUpload(remote) || files.size > 1) {
             val written = writeState(book, "$key.json", files)
             versions = mapOf(written.id to written.version)
             remote = book
         }
         store.transaction {
-            if (store.state.books.getValue(key).pending && store.loadBook(key) == book) {
+            if (store.state.books.getValue(key).pending && store.loadBook(key, remote) == book) {
                 store.updateRecord(key) { it.copy(pending = false) }
                 store.save()
             }
@@ -520,7 +530,7 @@ class GoogleDriveSyncManager internal constructor(
         }
         val replaced = remote.generation > record.generation && (record.attached || record.deleted)
         suspend fun applyBook() = store.transaction {
-            var local = store.loadBook(key)!!
+            var local = store.loadBook(key, remote)!!
             if (replaced) {
                 store.removeBookFiles(key)
                 store.updateRecord(key) { it.copy(cleanup = it.cleanup + record.generation) }
@@ -653,7 +663,7 @@ class GoogleDriveSyncManager internal constructor(
             val files = drive.children(cache.stateFolder, "$key.json")
             val remote = readState(files, SyncBook::merge)
             mergeBook(key, remote)
-            val book = store.loadBook(key)!!
+            val book = store.loadBook(key, remote) ?: return
             if (book.needsUpload(remote)) {
                 store.transaction {
                     store.updateRecord(key) { it.copy(pending = true) }
