@@ -25,6 +25,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -49,6 +51,7 @@ class GoogleDriveClient internal constructor(
         @IoDispatcher ioDispatcher: CoroutineDispatcher,
     ) : this(auth, auth::provider, { checkValidatedInternet(context) }, ioDispatcher)
     private val connections = Collections.synchronizedSet(mutableSetOf<HttpURLConnection>())
+    private val limit = Semaphore(8)
     @Volatile private var isStopped = false
     @Volatile var connectionId = 0
         private set
@@ -184,7 +187,7 @@ class GoogleDriveClient internal constructor(
             setRequestProperty("Authorization", "Bearer $token")
             contentType?.let { setRequestProperty("Content-Type", it) }
         }
-        val (status, data) = coroutineScope {
+        val (status, data) = limit.withPermit { coroutineScope {
             suspendCancellableCoroutine { continuation ->
                 val job = launch(ioDispatcher) {
                     continuation.resumeWith(runCatching {
@@ -208,7 +211,7 @@ class GoogleDriveClient internal constructor(
                     job.cancel()
                 }
             }
-        }
+        } }
         checkConnection(connection)
         currentCoroutineContext().ensureActive()
         if (status == 401 && retry) {
