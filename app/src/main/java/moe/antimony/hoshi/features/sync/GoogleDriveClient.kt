@@ -101,7 +101,7 @@ class GoogleDriveClient internal constructor(
         }.toByteArray()
         return SyncFormat.json.decodeFromString(request(
             path = fileId?.let { "files/${it.urlPathSegment()}" } ?: "files",
-            query = mapOf("uploadType" to "multipart", "fields" to "id,name,mimeType,version,createdTime"),
+            query = mapOf("uploadType" to "multipart", "fields" to "id,name,mimeType,md5Checksum,createdTime"),
             method = if (fileId == null) "POST" else "PATCH",
             body = body,
             contentType = "multipart/related; boundary=$boundary",

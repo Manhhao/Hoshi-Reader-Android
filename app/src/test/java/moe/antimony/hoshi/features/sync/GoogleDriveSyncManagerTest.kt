@@ -89,7 +89,8 @@ class GoogleDriveSyncManagerTest {
         assertEquals(1, f.remote.reads["a"])
         val metadata = f.books.loadMetadata(f.store.bookDirectory("book-a"))!!
         f.manager.sync(metadata)
-        assertEquals(1, f.remote.reads["a"])
+        assertEquals(2, f.remote.reads["a"])
+        assertEquals(1, f.remote.queries.count { "book-a.json" in it })
         f.manager.stop()
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         val settings = SyncSettingsRepository(MemoryPreferences(), NoTtu, dispatcher)
@@ -97,7 +98,8 @@ class GoogleDriveSyncManagerTest {
         val client = GoogleDriveClient(object : DriveAccessTokenProvider { override suspend fun accessToken() = "token" }, { SyncProvider.Gdrive }, {}, dispatcher, f.remote::connection)
         val restarted = GoogleDriveSyncManager(f.store, GoogleDriveSyncHandler(client), client, settings, f.books, temporary.root, temporary.root.resolve("cache"), CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[Job])), dispatcher, dispatcher, { true }, {}, {})
         restarted.sync(metadata)
-        assertEquals(1, f.remote.reads["a"])
+        assertEquals(3, f.remote.reads["a"])
+        assertEquals(1, f.remote.queries.count { "book-a.json" in it })
         assertEquals(mapOf("a" to "1"), restarted.cache.bookVersions["book-a"])
     }
 
@@ -165,7 +167,7 @@ class GoogleDriveSyncManagerTest {
         assertEquals(1, f.remote.reads["a"])
         assertEquals("Second edit", SyncFormat.decode<SyncBook>(f.remote.entries.getValue("a").data).metadata.value.title)
         f.remote.entries.getValue("a").apply {
-            file = file.copy(version = "9")
+            file = file.copy(md5Checksum = "9")
             data = SyncFormat.encode(remoteBook.copy(metadata = Timestamped(4000, SyncMetadata("Other device"))))
         }
         f.manager.sync()
@@ -183,7 +185,7 @@ class GoogleDriveSyncManagerTest {
         runCurrent()
         val reference = f.store.state.books.getValue("book-a").files.getValue(SyncFileType.epub)
         assertEquals("book-a.epub", reference.value)
-        assertTrue(f.store.state.books.getValue("book-a").pending)
+        assertFalse(f.store.state.books.getValue("book-a").pending)
         assertFalse(f.manager.state.value.isSyncing)
         assertNull(f.manager.state.value.progress)
         assertTrue(f.manager.state.value.queue.isEmpty())
@@ -296,7 +298,7 @@ class GoogleDriveSyncManagerTest {
             f.books.statisticsStore.saveTrackedSession(f.store.bookDirectory(key), "ACTIVE", moe.antimony.hoshi.epub.ReadingSession(1, 2, 10, 1.0))
         }
         val entry = f.remote.entries.getValue("a")
-        entry.file = entry.file.copy(version = "2")
+        entry.file = entry.file.copy(md5Checksum = "2")
         entry.data = SyncFormat.encode(remoteBook.copy(generation = 2))
         f.manager.sync()
         runCurrent()
@@ -322,7 +324,7 @@ class GoogleDriveSyncManagerTest {
             }.await()
         }
         val entry = f.remote.entries.getValue("a")
-        entry.file = entry.file.copy(version = "2")
+        entry.file = entry.file.copy(md5Checksum = "2")
         entry.data = SyncFormat.encode(remoteBook.delete())
         f.manager.sync()
         runCurrent()
@@ -453,9 +455,9 @@ class GoogleDriveSyncManagerTest {
             if (method == "GET" && path == "files") {
                 val q = query.getValue("q")
                 queries += q
-                val parent = Regex("'([^']+)' in parents").find(q)!!.groupValues[1]
+                val parent = Regex("'([^']+)' in parents").find(q)?.groupValues?.get(1)
                 val name = Regex("name='([^']*)'").find(q)?.groupValues?.get(1)
-                val matching = entries.values.filter { parent in it.file.parents.orEmpty() && (name == null || name == it.file.name) }
+                val matching = entries.values.filter { (parent == null || parent in it.file.parents.orEmpty()) && (name == null || name == it.file.name) }
                 val offset = query["pageToken"]?.toInt() ?: 0
                 return buildJsonObject {
                     put("files", JsonArray(matching.drop(offset).take(listPageSize).map {
@@ -478,7 +480,7 @@ class GoogleDriveSyncManagerTest {
                 val id = if (method == "PATCH") path.substringAfter("files/") else "new-${entries.size}"
                 val parent = metadata["parents"]?.jsonArray?.first()?.jsonPrimitive?.content ?: entries.getValue(id).file.parents!!.first()
                 val data = body.substringAfter("\r\n--", "").substringAfter("\r\n\r\n").substringBeforeLast("\r\n--")
-                val file = GoogleDriveFile(id, name, "application/octet-stream", ((entries[id]?.file?.version?.toInt() ?: 0) + 1).toString(), size = data.toByteArray().size.toString(), parents = listOf(parent), createdTime = "2020-01-01T00:00:00Z")
+                val file = GoogleDriveFile(id, name, "application/octet-stream", ((entries[id]?.file?.md5Checksum?.toInt() ?: 0) + 1).toString(), size = data.toByteArray().size.toString(), parents = listOf(parent), createdTime = "2020-01-01T00:00:00Z")
                 entries[id] = Entry(file, data)
                 writes += id
                 return SyncFormat.json.encodeToString(file)

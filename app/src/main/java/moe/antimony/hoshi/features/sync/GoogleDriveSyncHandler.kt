@@ -17,7 +17,7 @@ data class GoogleDriveFile(
     val id: String,
     val name: String,
     val mimeType: String,
-    val version: String,
+    val md5Checksum: String? = null,
     val size: String? = null,
     val parents: List<String>? = null,
     val trashed: Boolean? = null,
@@ -45,7 +45,7 @@ data class GoogleDriveLayout(val root: String, val state: String, val books: Str
 
 @Singleton
 class GoogleDriveSyncHandler @Inject constructor(private val client: GoogleDriveClient) {
-    private val fileFields = "id,name,mimeType,version,size,parents,trashed,createdTime"
+    private val fileFields = "id,name,mimeType,md5Checksum,size,parents,trashed,createdTime"
 
     suspend fun startToken(): String = SyncFormat.json.parseToJsonElement(
         client.request("changes/startPageToken").decodeToString(),
@@ -66,14 +66,13 @@ class GoogleDriveSyncHandler @Inject constructor(private val client: GoogleDrive
         return GoogleDriveLayout(root, folder(root, "state", true)!!, folder(root, "books", true)!!)
     }
 
-    suspend fun fileFolder(books: String, key: String, generation: Int, create: Boolean): String? {
-        val book = folder(books, key, create) ?: return null
-        return folder(book, generation.toString(), create)
-    }
-
     suspend fun folder(parent: String, name: String, create: Boolean): String? {
         children(parent, name).firstOrNull { it.isFolder }?.let { return it.id }
         if (!create) return null
+        return createFolder(parent, name)
+    }
+
+    suspend fun createFolder(parent: String, name: String): String {
         val body = buildJsonObject {
             put("name", name)
             put("parents", JsonArray(listOf(JsonPrimitive(parent))))
@@ -115,9 +114,7 @@ class GoogleDriveSyncHandler @Inject constructor(private val client: GoogleDrive
         client.write(data, fileName, folder)
     }
 
-    suspend fun download(fileName: String, folder: String?, destination: File, onProgress: (Double) -> Unit) {
-        val file = folder?.let { children(it, fileName).firstOrNull() }
-            ?: throw GoogleDriveApiException("$fileName is missing from Google Drive.", 404)
+    suspend fun download(file: GoogleDriveFile, destination: File, onProgress: (Double) -> Unit) {
         val size = file.size!!.toLong()
         client.performDownload(driveUrl("files/${file.id.urlPathSegment()}", mapOf("alt" to "media")), destination) { received, _ ->
             if (size > 0) onProgress(received.toDouble() / size)

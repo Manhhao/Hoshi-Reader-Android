@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -21,6 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Required
 import kotlinx.serialization.Serializable
@@ -44,6 +47,7 @@ data class GoogleDriveSyncCache(
     @Required val stateFolder: String = "",
     @Required val bookFolder: String = "",
     @Required val bookVersions: Map<String, Map<String, String>> = emptyMap(),
+    val bookFolders: Map<String, String> = emptyMap(),
 )
 
 data class GoogleDriveSyncState(
@@ -64,13 +68,31 @@ private enum class SyncPhase { State, File }
 
 private data class BookError(val title: String, val message: UiText)
 
-private class RemoteChanges(val listed: Map<String, List<GoogleDriveFile>>?, val changed: Set<String>, val cursor: String) {
+private class RemoteChanges(val listed: Map<String, List<GoogleDriveFile>>?, val changed: Map<String, List<GoogleDriveFile>>, val cursor: String) {
     operator fun contains(key: String) = key in changed || listed?.containsKey(key) == true
 
-    fun files(key: String): List<GoogleDriveFile>? = if (key in changed) null else listed?.let { it[key].orEmpty() }
+    fun files(key: String, cached: Map<String, String>?): List<GoogleDriveFile>? {
+        val changed = changed[key]
+        if (changed == null && listed != null) return listed[key].orEmpty()
+        val files = cachedFiles(key, cached)?.toMutableMap() ?: return null
+        for (file in changed.orEmpty()) if (file.trashed == true) files -= file.id else files[file.id] = file
+        return files.values.sortedBy { it.id }
+    }
 }
 
-private typealias Folders = MutableMap<Pair<String, Int>, String>
+private fun cachedFiles(key: String, versions: Map<String, String>?): Map<String, GoogleDriveFile>? =
+    versions?.mapValues { (id, checksum) -> GoogleDriveFile(id, "$key.json", "", checksum, createdTime = "") }
+
+private fun fileVersions(files: List<GoogleDriveFile>): Map<String, String> = files.associate { it.id to it.md5Checksum.orEmpty() }
+
+private class Listing {
+    var listed = false
+    val books = mutableMapOf<String, String>()
+    val folders = mutableMapOf<Pair<String, Int>, String>()
+    val files = mutableMapOf<Pair<String, String>, GoogleDriveFile>()
+    val created = mutableSetOf<String>()
+    var published = false
+}
 
 class GoogleDriveSyncException(val text: UiText) : Exception()
 
@@ -260,23 +282,10 @@ class GoogleDriveSyncManager internal constructor(
             try {
                 currentCoroutineContext().ensureActive()
                 mutableState.value = state.value.copy(errorMessage = null)
-                if (book != null) {
-                    if (cache.stateFolder.isEmpty()) loadLayout()
-                    val key = book.folder!!.syncKey()
-                    recordBook(key, SyncPhase.State, runCatching { syncBook(key) })
-                    return@launch
-                }
-                val remote = changes()
-                val pending = store.transaction { store.state.books.filterValues { it.pending }.keys }
-                val keys = (remote.changed + remote.listed?.keys.orEmpty() + pending - ".shelves").sorted()
-                for (key in keys) recordBook(key, SyncPhase.State, runCatching { syncBook(key, remote.files(key)) })
-                val failed = keys.any { (it to SyncPhase.State) in bookErrors }
-                if (!failed && store.transaction { store.state.books.values.none { !it.attached && !it.deleted } }) {
-                    if (".shelves" in remote || store.state.shelvesPending) syncShelves()
-                    cache = cache.copy(cursor = remote.cursor)
-                    saveCache()
-                    mutableState.value = state.value.copy(lastSync = System.currentTimeMillis())
-                    unsupportedFormat = false
+                try {
+                    syncState(book)
+                } finally {
+                    withContext(NonCancellable) { saveCache() }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -300,11 +309,40 @@ class GoogleDriveSyncManager internal constructor(
         }
     }
 
+    private suspend fun syncState(book: BookMetadata?) {
+        if (book != null) {
+            if (cache.stateFolder.isEmpty()) loadLayout()
+            val key = book.folder!!.syncKey()
+            recordBook(key, SyncPhase.State, runCatching { syncBook(key) })
+            return
+        }
+        val remote = changes()
+        val pending = store.transaction { store.state.books.filterValues { it.pending }.keys }
+        val keys = (remote.changed.keys + remote.listed?.keys.orEmpty() + pending - ".shelves").sorted()
+        concurrent(keys) { key ->
+            val files = remote.files(key, cache.bookVersions[key])
+            recordBook(key, SyncPhase.State, runCatching { syncBook(key, files) })
+        }
+        val failed = keys.any { (it to SyncPhase.State) in bookErrors }
+        if (!failed && store.transaction { store.state.books.values.none { !it.attached && !it.deleted } }) {
+            if (".shelves" in remote || store.state.shelvesPending) syncShelves()
+            cache = cache.copy(cursor = remote.cursor)
+            mutableState.value = state.value.copy(lastSync = System.currentTimeMillis())
+            unsupportedFormat = false
+        }
+    }
+
+    private suspend fun <T> concurrent(items: List<T>, action: suspend (T) -> Unit) = coroutineScope {
+        val limit = Semaphore(8)
+        for (item in items) launch { limit.withPermit { action(item) } }
+    }
+
     private suspend fun startFileSync() {
         if (!enabled() || unsupportedFormat || state.value.errorMessage != null || stateTask != null || fileTransferTask != null || downloadTask != null || cache.bookFolder.isEmpty()) return
         val task = scope.launch(start = CoroutineStart.LAZY) {
+            var published = false
             try {
-                runFileSync()
+                published = runFileSync()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -314,26 +352,32 @@ class GoogleDriveSyncManager internal constructor(
                 progress = null
                 publish()
             }
+            if (published) scope.launch { sync() }
         }
         fileTransferTask = task
         publish()
         task.start()
     }
 
-    private suspend fun runFileSync() {
-        val folders: Folders = mutableMapOf()
+    private suspend fun runFileSync(): Boolean {
         val keys = store.transaction { store.state.books.keys.sorted() }
         beginTransfers(keys)
-        for (key in keys) {
-            currentCoroutineContext().ensureActive()
-            progress = progress?.copy(current = key)
-            publish()
-            recordBook(key, SyncPhase.File, runCatching { syncFiles(key, folders) })
-            finishTransfer(key)
+        val listing = if (progress == null) Listing() else listFiles()
+        try {
+            concurrent(keys) { key ->
+                currentCoroutineContext().ensureActive()
+                progress = progress?.copy(current = key)
+                publish()
+                recordBook(key, SyncPhase.File, runCatching { syncFiles(key, listing) })
+                finishTransfer(key)
+            }
+        } finally {
+            withContext(NonCancellable) { saveCache() }
         }
+        return listing.published
     }
 
-    private suspend fun syncFiles(key: String, folders: Folders) {
+    private suspend fun syncFiles(key: String, listing: Listing) {
         var failure: Throwable? = null
         suspend fun attempt(action: suspend () -> Unit) {
             val error = runCatching { action() }.exceptionOrNull() ?: return
@@ -343,11 +387,11 @@ class GoogleDriveSyncManager internal constructor(
         for (type in SyncFileType.entries) {
             currentCoroutineContext().ensureActive()
             attempt {
-                uploadFile(key, type, folders)
-                if (type != SyncFileType.epub) downloadFile(key, type, folders)
+                uploadFile(key, type, listing)
+                if (type != SyncFileType.epub) downloadFile(key, type, listing)
             }
         }
-        attempt { cleanupFiles(key, folders) }
+        attempt { cleanupFiles(key, listing) }
         failure?.let { throw it }
     }
 
@@ -415,7 +459,7 @@ class GoogleDriveSyncManager internal constructor(
             (state.value.errorMessage ?: bookErrors[key to SyncPhase.State]?.message)?.let { throw GoogleDriveSyncException(it) }
             currentCoroutineContext().ensureActive()
             if (store.state.books[key]?.deleted == true) throw GoogleDriveSyncException(UiText.Resource(R.string.sync_book_deleted))
-            if (enabled() && store.state.books[key]?.files?.get(SyncFileType.epub)?.value != null) downloadFile(key, SyncFileType.epub, mutableMapOf(), onProgress)
+            if (enabled() && store.state.books[key]?.files?.get(SyncFileType.epub)?.value != null) downloadFile(key, SyncFileType.epub, Listing(), onProgress)
             currentCoroutineContext().ensureActive()
             val metadata = books.loadMetadata(store.bookDirectory(book.folder)) ?: book
             if (metadata.epub == null) throw GoogleDriveSyncException(UiText.Resource(R.string.sync_book_not_uploaded))
@@ -433,7 +477,7 @@ class GoogleDriveSyncManager internal constructor(
 
     private suspend fun changes(): RemoteChanges {
         var listed: Map<String, List<GoogleDriveFile>>? = null
-        val changed = mutableSetOf<String>()
+        val changed = mutableMapOf<String, List<GoogleDriveFile>>()
         var cursor = cache.cursor ?: drive.startToken().also { listed = listRemote() }
         while (true) {
             val page = drive.changes(cursor)
@@ -441,7 +485,8 @@ class GoogleDriveSyncManager internal constructor(
             if (page.changes.any { change -> change.file?.let { it.isFolder && (it.name == "Hoshi Reader" || it.parents?.contains(cache.root) == true) } == true }) listed = listRemote()
             for (change in page.changes) {
                 val file = change.file
-                if (!change.removed && file?.trashed != true && file?.parents?.contains(cache.stateFolder) == true) file.stateKey?.let { changed += it }
+                if (change.removed || file?.parents?.contains(cache.stateFolder) != true) continue
+                file.stateKey?.let { changed[it] = changed[it].orEmpty() + file }
             }
             cursor = page.nextPageToken ?: return RemoteChanges(listed, changed, page.newStartPageToken!!)
         }
@@ -460,16 +505,30 @@ class GoogleDriveSyncManager internal constructor(
         return files.filter { it.stateKey != null }.groupBy { it.stateKey!! }
     }
 
-    private suspend fun syncBook(key: String, listed: List<GoogleDriveFile>? = null) {
-        val files = listed ?: drive.children(cache.stateFolder, "$key.json")
-        currentCoroutineContext().ensureActive()
-        var versions = files.associate { it.id to it.version }
-        if (files.size == 1 && store.state.books[key]?.pending == false && cache.bookVersions[key] == versions) return
-        if (key in cache.bookVersions) {
+    private suspend fun remoteState(key: String, listed: List<GoogleDriveFile>?): Pair<List<GoogleDriveFile>, SyncBook?>? {
+        if (listed == null) {
+            val files = cachedFiles(key, cache.bookVersions[key])?.values?.toList() ?: drive.children(cache.stateFolder, "$key.json")
+            currentCoroutineContext().ensureActive()
             cache = cache.copy(bookVersions = cache.bookVersions - key)
-            saveCache()
+            return try {
+                files to readState(files, SyncBook::merge)
+            } catch (error: GoogleDriveApiException) {
+                val found = drive.children(cache.stateFolder, "$key.json")
+                found to readState(found, SyncBook::merge)
+            }
         }
-        var remote = remoteBooks[key]?.takeIf { it.first == versions }?.second ?: readState(files, SyncBook::merge)
+        currentCoroutineContext().ensureActive()
+        val versions = fileVersions(listed)
+        if (listed.size == 1 && store.state.books[key]?.pending == false && cache.bookVersions[key] == versions) return null
+        cache = cache.copy(bookVersions = cache.bookVersions - key)
+        remoteBooks[key]?.takeIf { it.first == versions }?.let { return listed to it.second }
+        return listed to readState(listed, SyncBook::merge)
+    }
+
+    private suspend fun syncBook(key: String, listed: List<GoogleDriveFile>? = null) {
+        val (files, state) = remoteState(key, listed) ?: return
+        var remote = state
+        var versions = fileVersions(files)
         mergeBook(key, remote)
         val book = store.loadBook(key, remote)
         if (book == null) {
@@ -483,7 +542,7 @@ class GoogleDriveSyncManager internal constructor(
         }
         if (book.needsUpload(remote) || files.size > 1) {
             val written = writeState(book, "$key.json", files)
-            versions = mapOf(written.id to written.version)
+            versions = mapOf(written.id to written.md5Checksum.orEmpty())
             remote = book
         }
         store.transaction {
@@ -494,7 +553,6 @@ class GoogleDriveSyncManager internal constructor(
         }
         remoteBooks = remoteBooks + (key to (versions to remote!!))
         cache = cache.copy(bookVersions = cache.bookVersions + (key to versions))
-        saveCache()
     }
 
     private suspend inline fun <reified T> readState(files: List<GoogleDriveFile>, merge: (T, T) -> T): T? {
@@ -563,7 +621,7 @@ class GoogleDriveSyncManager internal constructor(
         }
     }
 
-    private suspend fun uploadFile(key: String, fileType: SyncFileType, folders: Folders) {
+    private suspend fun uploadFile(key: String, fileType: SyncFileType, listing: Listing) {
         val (record, source, url) = store.transaction {
             val record = store.state.books.getValue(key)
             if (!record.attached || (record.deleted && fileType != SyncFileType.cover)) return@transaction null
@@ -572,6 +630,7 @@ class GoogleDriveSyncManager internal constructor(
             val url = store.sourceURL(key, fileType)
             if (url == null) {
                 store.updateRecord(key) { it.copy(files = it.files + (fileType to Timestamped(source, null)), pending = true) }
+                listing.published = true
                 store.saveChanges(false)
                 return@transaction null
             }
@@ -581,8 +640,7 @@ class GoogleDriveSyncManager internal constructor(
         val data = withContext(ioDispatcher) { url.readBytes() }
         currentCoroutineContext().ensureActive()
         if (!canPublish(key, fileType, source, record.generation)) return
-        val folder = fileFolder(folders, key, record.generation, true)!!
-        drive.upload(data, name, folder)
+        upload(listing, key, record.generation, name, data)
         currentCoroutineContext().ensureActive()
         store.transaction {
             if (!canPublish(key, fileType, source, record.generation)) return@transaction
@@ -591,19 +649,98 @@ class GoogleDriveSyncManager internal constructor(
                 it.copy(files = it.files + (fileType to Timestamped(source, name)), pending = true,
                     cleanup = if (fileType == SyncFileType.sasayaki && old != null && old != name) it.cleanup + record.generation else it.cleanup)
             }
+            listing.published = true
             store.saveChanges(false)
         }
     }
 
-    private suspend fun fileFolder(folders: Folders, key: String, generation: Int, create: Boolean): String? =
-        folders[key to generation] ?: drive.fileFolder(cache.bookFolder, key, generation, create)?.also { folders[key to generation] = it }
+    private suspend fun listFiles(): Listing {
+        val listing = Listing()
+        val listed = drive.list("'me' in owners")
+        val keys = listed.filter { it.parents?.contains(cache.bookFolder) == true }.associate { it.id to it.name }
+        listing.listed = true
+        val folders = mutableMapOf<String, String>()
+        for (file in listed) {
+            if (file.id in keys) listing.books.getOrPut(file.name) { file.id }
+            val parent = file.parents?.firstOrNull() ?: continue
+            val key = keys[parent]
+            val generation = file.name.toIntOrNull()
+            if (file.isFolder && key != null && generation != null) {
+                if ((key to generation) !in listing.folders) {
+                    listing.folders[key to generation] = file.id
+                    folders["$key/$generation"] = file.id
+                }
+            } else {
+                listing.files.getOrPut(parent to file.name) { file }
+            }
+        }
+        cache = cache.copy(bookFolders = folders)
+        return listing
+    }
+
+    private suspend fun folder(listing: Listing, key: String, generation: Int): String? = resolveFolder(listing, key, generation).second
+
+    private fun forgetFolder(listing: Listing, key: String, generation: Int) {
+        listing.folders -= key to generation
+        cache = cache.copy(bookFolders = cache.bookFolders - "$key/$generation")
+    }
+
+    private suspend fun upload(listing: Listing, key: String, generation: Int, name: String, data: ByteArray) {
+        var (book, folder) = resolveFolder(listing, key, generation)
+        if (folder == null) {
+            if (book == null) {
+                book = drive.createFolder(cache.bookFolder, key)
+                listing.books[key] = book
+            }
+            val created = drive.createFolder(book, generation.toString())
+            listing.created += created
+            rememberFolder(listing, key, generation, created)
+            folder = created
+        }
+        if ((folder to name) in listing.files) return
+        if (listing.listed || folder in listing.created) client.write(data, name, folder) else drive.upload(data, name, folder)
+    }
+
+    private suspend fun findFile(listing: Listing, key: String, generation: Int, name: String): GoogleDriveFile? {
+        (listing.folders[key to generation] ?: cache.bookFolders["$key/$generation"])?.let { folder ->
+            listing.files[folder to name]?.let { return it }
+            drive.children(folder, name).firstOrNull()?.let { return it }
+        }
+        for (book in drive.children(cache.bookFolder, key)) {
+            for (folder in drive.children(book.id, generation.toString())) {
+                drive.children(folder.id, name).firstOrNull()?.let {
+                    rememberFolder(listing, key, generation, folder.id)
+                    return it
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun resolveFolder(listing: Listing, key: String, generation: Int): Pair<String?, String?> {
+        var folder = listing.folders[key to generation]
+        var book = listing.books[key]
+        if (folder != null || listing.listed) return book to folder
+        if (book == null) book = drive.folder(cache.bookFolder, key, false)
+        if (book != null) {
+            folder = drive.folder(book, generation.toString(), false)
+            listing.books[key] = book
+        }
+        if (folder != null) rememberFolder(listing, key, generation, folder)
+        return book to folder
+    }
+
+    private fun rememberFolder(listing: Listing, key: String, generation: Int, folder: String) {
+        listing.folders[key to generation] = folder
+        cache = cache.copy(bookFolders = cache.bookFolders + ("$key/$generation" to folder))
+    }
 
     private suspend fun canPublish(key: String, fileType: SyncFileType, source: Long, generation: Int): Boolean = store.transaction {
         val record = store.state.books.getValue(key)
         record.generation == generation && record.sources[fileType] == source && (!record.deleted || fileType == SyncFileType.cover) && (record.files[fileType]?.modified ?: Long.MIN_VALUE) <= source
     }
 
-    private suspend fun downloadFile(key: String, fileType: SyncFileType, folders: Folders, onProgress: (Double) -> Unit = {}) {
+    private suspend fun downloadFile(key: String, fileType: SyncFileType, listing: Listing, onProgress: (Double) -> Unit = {}) {
         val (record, reference, root) = store.transaction {
             val record = store.state.books.getValue(key)
             if (record.deleted && fileType != SyncFileType.cover) return@transaction null
@@ -618,10 +755,10 @@ class GoogleDriveSyncManager internal constructor(
             Triple(record, reference, root)
         } ?: return
         val name = reference.value!!
-        val folder = fileFolder(folders, key, record.generation, false)
+        val file = findFile(listing, key, record.generation, name) ?: throw GoogleDriveApiException("$name is missing from Google Drive.", 404)
         val temporary = cacheDir.resolve(UUID.randomUUID().toString())
         try {
-            drive.download(name, folder, temporary, onProgress)
+            drive.download(file, temporary, onProgress)
             currentCoroutineContext().ensureActive()
             store.transaction {
                 val current = store.state.books.getValue(key)
@@ -657,7 +794,7 @@ class GoogleDriveSyncManager internal constructor(
         if (fileType == SyncFileType.sasayaki) reloadSyncedMatch?.invoke(key)
     }
 
-    private suspend fun cleanupFiles(key: String, folders: Folders) {
+    private suspend fun cleanupFiles(key: String, listing: Listing) {
         for (generation in store.transaction { store.state.books.getValue(key).cleanup }) {
             if (store.state.books.getValue(key).pending) return
             val files = drive.children(cache.stateFolder, "$key.json")
@@ -671,11 +808,11 @@ class GoogleDriveSyncManager internal constructor(
                 }
                 return
             }
-            val folder = fileFolder(folders, key, generation, false)
+            val folder = folder(listing, key, generation)
             var recent = false
             if (folder != null && generation < book.generation) {
                 client.trashFile(folder)
-                folders -= key to generation
+                forgetFolder(listing, key, generation)
                 currentCoroutineContext().ensureActive()
             } else if (folder != null) {
                 for (file in drive.children(folder).filter { !it.isFolder && it.name != book.files[SyncFileType.cover]?.value }) {

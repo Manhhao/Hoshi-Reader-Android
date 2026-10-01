@@ -24,6 +24,8 @@ Historical release notes before v1.3.0 live in [CHANGELOG_ARCHIVE.md](CHANGELOG_
   Full syncs of large libraries are faster, a failed book no longer stops the
   rest of the sync, and Sync settings show a transfer queue with progress and
   per-book errors.
+  Books sync eight at a time using far fewer Google Drive requests, and
+  rate-limited or failed requests are retried.
 
 ### Changed
 
